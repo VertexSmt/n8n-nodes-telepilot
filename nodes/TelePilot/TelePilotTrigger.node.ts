@@ -1,18 +1,19 @@
 import { Container } from 'typedi';
 
-import {
+import type {
 	IDataObject,
 	INodeType,
-	INodeTypeDescription, ITriggerFunctions, ITriggerResponse,
+	INodeTypeDescription,
+	ITriggerFunctions,
+	ITriggerResponse,
 } from 'n8n-workflow';
 
-const debug = require('debug')('telepilot-trigger')
+const debug = require('debug')('telepilot-trigger');
 
-import {TelePilotNodeConnectionManager, TelepilotAuthState} from "./TelePilotNodeConnectionManager";
+import { TelePilotNodeConnectionManager, TelepilotAuthState } from './TelePilotNodeConnectionManager';
 import { TDLibUpdateEvents } from './tdlib/updateEvents';
-import { TDLibUpdate } from './tdlib/types'
-import {Client} from "tdl";
-
+import type { TDLibUpdate } from './tdlib/types';
+import type { Client } from 'tdl';
 
 export class TelePilotTrigger implements INodeType {
 	description: INodeTypeDescription = {
@@ -68,65 +69,83 @@ export class TelePilotTrigger implements INodeType {
 	};
 	// The execute method will go here
 
-
 	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
 		const credentials = await this.getCredentials('telePilotApi');
 
-		const cM = Container.get(TelePilotNodeConnectionManager)
+		const cM = Container.get(TelePilotNodeConnectionManager);
 
-		let client: Client;
 		const clientSession = await cM.createClientSetAuthHandlerForPhoneNumberLogin(
 			credentials?.apiId as number,
 			credentials?.apiHash as string,
 			credentials?.phoneNumber as string,
 		);
-		debug("trigger.clientSession.authState: " + clientSession.authState)
-		if (clientSession.authState != TelepilotAuthState.WAIT_READY) {
-			await cM.closeLocalSession(credentials?.apiId as number)
-			this.emit([this.helpers.returnJsonArray([{a: "Telegram account not logged in. " +
-				"Please use ChatTrigger node together with loginWithPhoneNumber action. " +
-				"Please check our guide at https://telepilot.co/login-howto"}])])
+		debug('trigger.clientSession.authState: ' + clientSession.authState);
+		if (clientSession.authState !== TelepilotAuthState.WAIT_READY) {
+			await cM.closeLocalSession(credentials?.apiId as number);
+			this.emit([
+				this.helpers.returnJsonArray([
+					{
+						error:
+							'Telegram account not logged in. ' +
+							'Please use ChatTrigger node together with loginWithPhoneNumber action. ' +
+							'Please check our guide at https://telepilot.co/login-howto',
+					},
+				]),
+			]);
 		}
 
-		client = clientSession.client;
+		const client: Client = clientSession.client;
 
-		const updateEventsArray = this.getNodeParameter('events', '') as string;
+		const updateEventsArray = this.getNodeParameter('events', '') as string[];
 		const options = this.getNodeParameter('options', {}) as {
-			ignoreGroups: boolean;
-		}
+			ignoreGroups?: boolean;
+		};
 
-		const _emit = (data: IDataObject) => {
+		const emit = (data: IDataObject) => {
 			this.emit([this.helpers.returnJsonArray([data])]);
-		}
+		};
 
-		const _listener = (update: IDataObject | TDLibUpdate) => {
+		/**
+		 * Returns true if the incoming TDLib update should be delivered to the workflow.
+		 */
+		const shouldEmitUpdate = (update: IDataObject | TDLibUpdate): boolean => {
 			const incomingEvent = update._ as string;
-			if (updateEventsArray.includes(incomingEvent) || updateEventsArray.length == 0) {
-				if (options.ignoreGroups) {
-					const msg = update?.message;
-					const chatId = (typeof msg === 'object' && msg !== null && 'chat_id' in msg) ? msg.chat_id : undefined;
-					if (typeof chatId === 'number' && chatId < 0) {
-						return;
-					}
-				}
-				debug('Got update: ' + JSON.stringify(update, null, 2));
-				_emit(update);
+			const eventSelected = updateEventsArray.includes(incomingEvent) || updateEventsArray.length === 0;
+			if (!eventSelected) {
+				return false;
 			}
-		}
+			if (options.ignoreGroups) {
+				const msg = update.message as TDLibUpdate['message'];
+				const chatId = typeof msg === 'object' && msg !== null ? msg.chat_id : undefined;
+				if (typeof chatId === 'number' && chatId < 0) {
+					// Negative chat ids belong to groups/channels
+					return false;
+				}
+			}
+			return true;
+		};
+
+		const listener = (update: IDataObject) => {
+			if (shouldEmitUpdate(update)) {
+				debug('Got update: ' + JSON.stringify(update, null, 2));
+				emit(update);
+			}
+		};
 
 		if (this.getMode() !== 'manual') {
-			client.on('update', _listener);
+			client.on('update', listener);
 			client.on('error', debug);
 		}
 
-		async function closeFunction() {
+		const closeFunction = async () => {
 			debug('closeFunction(' + updateEventsArray + ')');
-			client.removeListener('update', _listener);
-		}
+			client.removeListener('update', listener);
+		};
 
 		const manualTriggerFunction = async () => {
-			await new Promise((resolve, reject) => {
+			await new Promise<void>((resolve, reject) => {
 				const timeoutHandler = setTimeout(() => {
+					client.removeListener('update', manualListener);
 					reject(
 						new Error(
 							'Aborted, no message received within 30secs. This 30sec timeout is only set for "manually triggered execution". Active Workflows will listen indefinitely.',
@@ -134,18 +153,17 @@ export class TelePilotTrigger implements INodeType {
 					);
 				}, 30000);
 
-				const _listener2 = (update: IDataObject) => {
-					const incomingEvent = update._ as string;
-					if (updateEventsArray.includes(incomingEvent) || updateEventsArray.length == 0) {
+				const manualListener = (update: IDataObject) => {
+					if (shouldEmitUpdate(update)) {
 						debug('Got update in manual: ' + JSON.stringify(update, null, 2));
-						_emit(update);
+						emit(update);
 
 						clearTimeout(timeoutHandler);
-						client.removeListener('update', _listener2);
-						resolve(true);
+						client.removeListener('update', manualListener);
+						resolve();
 					}
-				}
-				client.on('update',	_listener2);
+				};
+				client.on('update', manualListener);
 			});
 		};
 
@@ -155,5 +173,3 @@ export class TelePilotTrigger implements INodeType {
 		};
 	}
 }
-
-exports.TelePilotTrigger = TelePilotTrigger;

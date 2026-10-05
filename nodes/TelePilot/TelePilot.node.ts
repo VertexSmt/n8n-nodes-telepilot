@@ -1,15 +1,16 @@
 import 'reflect-metadata';
 
+import type { Client } from 'tdl';
 import {
-	IExecuteFunctions,
-	INodeExecutionData,
-	INodeType,
-	INodeTypeDescription,
 	NodeOperationError,
-	IDataObject
+type IDataObject,
+	type IExecuteFunctions,
+	type INodeExecutionData,
+	type INodeType,
+	type INodeTypeDescription,
 } from 'n8n-workflow';
-import {Container} from 'typedi';
-import {sleep, TelePilotNodeConnectionManager, TelepilotAuthState} from './TelePilotNodeConnectionManager';
+import { Container } from 'typedi';
+import { sleep, TelePilotNodeConnectionManager, TelepilotAuthState } from './TelePilotNodeConnectionManager';
 
 import {
 	operationChat,
@@ -171,8 +172,9 @@ export class TelePilot implements INodeType {
 
 		debug('Executing telePilot node, resource=' + resource + ', operation=' + operation);
 
-		let result;
-		let client;
+		let result: unknown;
+		// Assigned below for every resource except `login`; login-only flows never use it.
+		let client!: Client;
 		if (resource === 'login') {
 			if (operation === 'login') {
 
@@ -221,7 +223,6 @@ export class TelePilot implements INodeType {
 								case TelepilotAuthState.WAIT_PHONE_NUMBER:
 									await cM.clientLoginWithPhoneNumber(
 										credentials?.apiId as number,
-										credentials?.apiHash as string,
 										credentials?.phoneNumber as string
 									)
 									await sleep(1000);
@@ -979,7 +980,6 @@ export class TelePilot implements INodeType {
 						.split(',')
 						.map((s) => s.toString().trim())
 						.filter((s) => s.length > 0);
-
 
 					const result = await client.invoke({
 						_: 'forwardMessages',
